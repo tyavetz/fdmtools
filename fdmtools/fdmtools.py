@@ -25,6 +25,12 @@ import pyshtools as pysh
 
 # Constants
 G = 4.30091727e-6               # Gravitational constant in kpc / M_sun * (km / s)^2
+hbar = 6.582119569509067e-16    # Reduced Planck constant in eV * s
+c_constant = 2.99792458e5       # Speed of light in km/s
+
+# Conversions:
+km_to_kpc = 3.240779289444365e-17       # Conversion from km to kpc
+km_s_to_kpc_gyr = 1.022712165045695     # Conversion from km/s to kpc/Gyr
 
 # Cosmology
 Om = 0.2865                     # Omega matter
@@ -34,11 +40,8 @@ overdensity = 347.0             # Overdensity for spherical collapse
 rho_vir = overdensity * rho_m   # Average density within the virial radius
 
 # Quantum Mechanics
-m_s = 8.1e-23                   # FDM particle mass in eV / c^2
-m22 = 0.81                      # FDM particle mass in eV / c^2 * 10^-22
-m23 = 8.1                       # FDM particle mass in eV / c^2 * 10^-23
-m2h2 = 0.0017850762909265429    # Scaled unit (m_s / h_bar)^2 for Schrodinger Equation in astrophysical units: (kpc * km / s)^-2 
-
+m_a = 8.1e-23                                           # FDM particle mass in eV / c^2
+h_over_m = hbar / (m_a / c_constant**2) * km_to_kpc     # Scaled unit (h_bar / m_a) in astrophysical units: (kpc * km / s)
 
 
 def t_freefall(r, M_enc):
@@ -57,7 +60,7 @@ def t_freefall(r, M_enc):
     T_ff : numeric
         Freefall time in Gyr
     """
-    G_Gyr = G * 1.023**2.
+    G_Gyr = G * km_s_to_kpc_gyr**2.
     T_ff = np.sqrt((np.pi**2. * r**3.) / (8. * M_enc * G_Gyr))
     return T_ff
 
@@ -94,6 +97,7 @@ def r_core(M_halo, powerlaw=1/3):
     r_core : numeric
         Core radius in kpc
     """
+    m22 = m_a / 1e-22
     r_c = 1.6 / m22 * (M_halo / 1e9)**(-powerlaw)
     return r_c
 
@@ -116,6 +120,7 @@ def rho_core(r, r_c):
     rho_c : numeric
         Density at radius r in solar masses per kpc^3
     """
+    m23 = m_a / 1e-23
     rho_c = (1.9 * m23**(-2.) * r_c**(-4.)) / (1. + 0.091 * (r / r_c)**2.)**8.
     return rho_c * 1e9
 
@@ -148,7 +153,7 @@ def phi_calc(r, rho):
     return -4. * np.pi * G * (1. / r * integral1 + integral2)
 
 
-def initiate_potential(rho_in, core=False, M_halo=None, powerlaw=1/3):
+def initiate_potential(rho_in, core=False, r_max=None, powerlaw=1/3):
     """
     Initiate functions for calculating the potential and density as a function of radius
     
@@ -158,8 +163,6 @@ def initiate_potential(rho_in, core=False, M_halo=None, powerlaw=1/3):
         A Python function that returns the density in Solar Masses per kpc^3 at a given radius (in kpc)
     core : bool (optional, default: False)
         Superpose a soliton core based on a powerlaw Core-Halo relation
-    M_halo : numeric
-        Halo mass in solar masses for determining the core density; required only if core==True
     powerlaw : numeric (default: 1/3)
         Powerlaw relation between the halo mass and the core mass. Default is 1/3, following the Schive et al. (2014) relation
     
@@ -182,9 +185,14 @@ def initiate_potential(rho_in, core=False, M_halo=None, powerlaw=1/3):
         phi_out = scinterp.CubicSpline(rspline, phispline)
 
     elif core==True:
+        dM = lambda r: 4. * np.pi * rho_in(r) * r**2
 
-        if M_halo is None:
-            print('Must input M_halo parameter for core-halo mass relation if core==True')
+        if r_max is None:
+            M_halo, err = scinteg.quad(dM, 0., np.inf)
+        else:
+            M_halo, err = scinteg.quad(dM, 0., r_max)
+
+        print('Soliton for halo mass '+"{:.2e}".format(M_halo)+' Solar Masses')
 
         r_c = r_core(M_halo, powerlaw=powerlaw)
         rho_c = rho_core(rspline, r_c)
@@ -201,12 +209,15 @@ def initiate_potential(rho_in, core=False, M_halo=None, powerlaw=1/3):
         phi_out = scinterp.CubicSpline(rspline, phispline)
 
     dM = lambda r: 4. * np.pi * rho_out(r) * r**2
-    M_total, err = scinteg.quad(dM, 0., np.inf)
+    if r_max is None:
+        M_total, err = scinteg.quad(dM, 0., np.inf)
+    else:
+        M_total, err = scinteg.quad(dM, 0., r_max)
 
     return phi_out, rho_out, M_total
 
 
-def DF_invert(phi, rho, M):
+def DF_invert(phi, rho):
     """
     Inversion formula to calculate the distribution function f(E) of a potential given an array of total energy
 
@@ -216,8 +227,6 @@ def DF_invert(phi, rho, M):
         Cubic spline object that returns the value of the potential in (km / s)^2 as a function of radius (in kpc)
     rho : scipy ppoly object (cubic spline)
         Cubic spline object that returns the value of the density in Solar Masses per kpc^3 as a function of radius
-    M : numeric
-        Total mass of the halo in Solar Masses
     
     Returns
     -------
@@ -225,28 +234,70 @@ def DF_invert(phi, rho, M):
         Cubic spline object that returns the value of the distribution function as a function of the total energy in (km / s)^2
 
     """
-    Phimin = -phi(0.) * 1e-6
-    Phimax = -phi(0.) * (1. - 1e-6)
-    Phispline = np.linspace(Phimin, Phimax, 1024)
-    rspline = np.array([phi.solve(-Phi, extrapolate=False)[0] for Phi in Phispline])
-    nuspline = rho(rspline) / M
+    r_spline = np.logspace(-3, 3, 1024)
+    phi_spline = phi(r_spline)
+    rho_spline = rho(r_spline)
 
-    nu = scinterp.CubicSpline(Phispline, nuspline)
-    dnu_dPhi = nu.derivative()
+    e_range = phi_spline
 
-    def integrand(Phi_integ, Eps_integ):
-        return 1. / np.sqrt(Eps_integ - Phi_integ) * dnu_dPhi(Eps_integ)
+    rho_phi = scinterp.CubicSpline(phi_spline, rho_spline)
+    drho_dphi = rho_phi.derivative()
 
-    Epsspline = Phispline
-    Hspline = -Epsspline
+    def integrand(phi_integ, e_prime):
+        return 1. / np.sqrt(phi_integ - e_prime) * drho_dphi(phi_integ)
 
-    integralspline = np.array([scinteg.quad(integrand, 0., Eps, args=(Eps,))[0] for Eps in Epsspline])
+    prefactor = 1. / (2. * np.sqrt(2.) * np.pi**2)
 
-    integral = scinterp.CubicSpline(Epsspline, integralspline)
-    dintegral_dEps = integral.derivative()
+    integ_spline = np.array([scinteg.quad(integrand, e_prime, e_range[-1], args=(e_prime,))[0] for e_prime in e_range[:-1]])
 
-    f_Espline = np.array([1. / (np.sqrt(8.) * np.pi**2) * dintegral_dEps(Eps) for Eps in Epsspline])
-    f_E = scinterp.CubicSpline(np.flip(Hspline), np.flip(f_Espline))
+    integral = scinterp.CubicSpline(e_range[:-1], prefactor * integ_spline)
+    f_E = integral.derivative()
+
+    return f_E
+
+
+def DF_invert_radial(phi, rho):
+    """
+    Inversion formula to calculate the distribution function f(E) of a potential given an array of total energy
+
+    Parameters
+    ----------
+    phi : scipy ppoly object (cubic spline)
+        Cubic spline object that returns the value of the potential in (km / s)^2 as a function of radius (in kpc)
+    rho : scipy ppoly object (cubic spline)
+        Cubic spline object that returns the value of the density in Solar Masses per kpc^3 as a function of radius
+    
+    Returns
+    -------
+    f_E : scipy ppoly object (cubic spline)
+        Cubic spline object that returns the value of the distribution function as a function of the total energy in (km / s)^2
+
+    """
+    r_spline = np.logspace(-3, 3, 1024)
+    phi_spline = phi(r_spline)
+    rho_spline = rho(r_spline)
+
+    e_range = phi_spline
+
+    r_phi = scinterp.CubicSpline(phi_spline, r_spline)
+
+    rho_phi = scinterp.CubicSpline(phi_spline, rho_spline)
+
+    def integrand(phi_integ, e_prime):
+        # return 1. / np.sqrt(phi_integ - e_prime) * rho_phi(phi_integ)
+        return 1. / np.sqrt(phi_integ - e_prime) * rho_phi(phi_integ) * r_phi(phi_integ)**2
+
+
+    integ_spline = np.array([scinteg.quad(integrand, e_prime, e_range[-1], args=(e_prime,))[0] for e_prime in e_range[:-1]])
+
+    integral = scinterp.CubicSpline(e_range[:-1], integ_spline)
+    deriv = integral.derivative()
+
+    # prefactor = -r_phi(e_range[:-1])**2 / (np.sqrt(2.) * np.pi**2)
+    prefactor = -1. / (np.sqrt(2.) * np.pi**2)
+    deriv_spline = deriv(e_range[:-1])
+
+    f_E = scinterp.CubicSpline(e_range[:-1], prefactor * deriv_spline)
 
     return f_E
 
@@ -275,9 +326,9 @@ def g_E(phi):
 
     g_Espline = np.array([(4. * np.pi)**2 * scinteg.quad(integrand, 0., phi.solve(E, extrapolate=False)[0], args=(E,))[0] for E in Espline])
 
-    g_E = scinterp.CubicSpline(Espline, g_Espline)
+    gE = scinterp.CubicSpline(Espline, g_Espline)
 
-    return g_E
+    return gE
 
 
 def dndE(E_nl, phi, bins=100, sparse_adjust=True):
@@ -285,12 +336,12 @@ def dndE(E_nl, phi, bins=100, sparse_adjust=True):
     Numerical calculation of the density of states (or states per energy bin dn / dE) as a function of total energy
 
     """
-    m_shape = np.zeros(np.shape(E_nl)[0], dtype=int)
-    for i in range(np.shape(E_nl)[0]):
+    m_shape = np.zeros(np.shape(E_nl)[1], dtype=int)
+    for i in range(np.shape(E_nl)[1]):
         m_shape[i] = 2 * i + 1
-    E_nl_repeat = np.repeat(E_nl, m_shape, axis=0)
+    E_nl_repeat = np.repeat(E_nl, m_shape, axis=1)
     Eflat = E_nl_repeat.flatten()[E_nl_repeat.flatten()!=0]
-    bindata, binedges = np.histogram(Eflat, bins=100, range=(phi(0.), np.max(Eflat)))
+    bindata, binedges = np.histogram(Eflat, bins=bins, range=(phi(0.), np.max(Eflat)))
 
     if sparse_adjust==False:
         dnde = np.zeros_like(Eflat)
@@ -313,8 +364,10 @@ def dndE(E_nl, phi, bins=100, sparse_adjust=True):
 
         dnde = np.zeros_like(Eflat)
         for i in range(int(len(Eflat))):
-            dnde[i] = bindata1[np.argmax(binedges>Eflat[i]) - 1]
+            dnde[i] = bindata1[np.argmax(binedges>Eflat[i]) - 1] / (binedges[1] - binedges[0])
         return Eflat, dnde
+
+
 
 
 def valsvecs(r, l, phi, Emax, nsteps=1024, verbose=False):
@@ -324,14 +377,14 @@ def valsvecs(r, l, phi, Emax, nsteps=1024, verbose=False):
 
     """
     r_guess, step = np.linspace(np.min(r), np.max(r), nsteps, retstep=True)
-    Dr2_0 = -1.0 / (2.0 * m2h2) / (step**2) * np.ones(nsteps) * (-2.)
-    Dr2_1 = -1.0 / (2.0 * m2h2) / (step**2) * np.ones(nsteps - 1)
-    Vvec = l * (l + 1) / (2. * r_guess**2. * m2h2) + np.array([phi(ri) for ri in r_guess])
+    Dr2_0 = -h_over_m**2 / (2 * step**2) * np.ones(nsteps) * (-2.)
+    Dr2_1 = -h_over_m**2 / (2 * step**2) * np.ones(nsteps - 1)
+    Vvec = h_over_m**2 * l * (l + 1) / (2. * r_guess**2) + np.array([phi(ri) for ri in r_guess])
         
     E_n, u_vecs_T = sp.linalg.eigh_tridiagonal(Dr2_0 + Vvec, Dr2_1, select='v', select_range=(-np.inf, Emax))
     u_vecs = u_vecs_T.T
     
-    R_n = np.zeros([len(E_n), len(r)])
+    R_n = np.empty((1, len(E_n)), dtype=object)
     
     for i in range(len(E_n)):
 
@@ -339,7 +392,7 @@ def valsvecs(r, l, phi, Emax, nsteps=1024, verbose=False):
 
             def fun(r, u, p):
                 E = p[0]
-                return np.vstack((u[1], u[0] * ((l * (l + 1)) / (r**2.) + 2. * m2h2 * (phi(r) - E))))
+                return np.vstack((u[1], u[0] * ((l * (l + 1)) / (r**2) + 2 * h_over_m**-2 * (phi(r) - E))))
 
             def bc(ya, yb, p):
                 return np.array([ya[0], yb[0], ya[1] - 0.1])
@@ -351,16 +404,19 @@ def valsvecs(r, l, phi, Emax, nsteps=1024, verbose=False):
             E_n[i] = res.p[0]
             R0 = res.sol(r)[0] / r
             A = 1. / np.sqrt(np.trapz(R0**2. * r**2., r))
-            R_n[i] = R0 * A
-            R_n[i, 0] = R_n[i, 1]
+            R1 = R0 * A
+            R1[0] = R1[1]
+
+            R_n[0, i] = scinterp.CubicSpline(r, R1)
 
         else:
             R0 = u_vecs[i] / r
             A = 1. / np.sqrt(np.trapz(R0**2. * r**2., r))
-            R_n[i] = R0 * A
+            R1 = R0 * A
+            R_n[0, i] = scinterp.CubicSpline(r, R1)
 
     if np.all(np.diff(E_n, n=2)[:-1] < 0)==False:
-        print('Warning! here may be missing and/or duplicated l='+str(l)+' eigenvalues; consider increasing nsteps parameter')
+        print('Warning! There may be missing and/or duplicated l='+str(l)+' eigenvalues; consider increasing nsteps parameter')
         if verbose==True:
             print(E_n)
             print(np.diff(E_n, n=2)[:-1])
@@ -369,48 +425,50 @@ def valsvecs(r, l, phi, Emax, nsteps=1024, verbose=False):
 
 
 
-def compute_radial_solutions(phi, Mh0, r_min=None, r_max=None, nsteps=1024, Emax_factor=1, verbose=True):
+def compute_radial_solutions(phi, rho, r_min=None, r_vir=None, rmax_factor=1, nsteps=1024, verbose=True):
     """
     Compute all eigenvalues and eigenvectors (for all l) for the Schrodinger equation
     """
     if r_min is None:
         r_min = 0.001
-    if r_max is not None:
-        Emax = phi(r_max) / 2.
-        r_end = phi.solve(Emax, extrapolate=False)[0]
-        print('r_end = '+str(r_end)+' kpc (eigenmodes calculated out to this radius, so that a good approximation of the waveform can be calculated at r_max)')
-    if r_max is None:
-        r_Emax = rvir_calc(Mh0) * Emax_factor
-        Emax = phi(r_Emax) / 2.
-        r_end = phi.solve(Emax, extrapolate=False)[0]
-        print('r_end = '+str(r_end)+' kpc (eigenmodes calculated out to this radius, so that a good approximation of the waveform can be calculated at r_max)')
-    rsolve = np.linspace(r_min, r_end, nsteps)
+    dM = lambda r: 4. * np.pi * rho(r) * r**2
+    M_total, err = scinteg.quad(dM, 0., r_vir)
+    Ek = 0.5 * G * M_total / r_vir
+    Emax = phi(r_vir) + Ek
+    rsolve = np.linspace(r_min, r_vir * 2, nsteps)
 
     E_nl_grid = []
-    R_nl_grid = []
     l = 0
     shape_n = 1
     while shape_n>0:
-        E_nl, R_nl = valsvecs(rsolve, l, phi, Emax, nsteps=nsteps, verbose=verbose)
-        shape_n = len(E_nl)
+        E_n, R_n = valsvecs(rsolve, l, phi, Emax, nsteps=nsteps, verbose=verbose)
+        shape_n = len(E_n)
         if shape_n==0:
             break
         if l==0:
+            R_nl_grid = np.copy(R_n.T)
             n_max = shape_n
+
+        elif shape_n == n_max:
+            R_nl_grid = np.hstack((R_nl_grid, R_n.T))
+
+        else:
+            R_n_long = np.concatenate((R_n, np.empty((1, n_max - shape_n), dtype=object)), axis=1)
+            R_nl_grid = np.hstack((R_nl_grid, R_n_long.T))
+
         E_nl_array = np.zeros(n_max)
-        R_nl_array = np.zeros([n_max, len(rsolve)])
-        E_nl_array[:shape_n] = E_nl
-        R_nl_array[:shape_n] = R_nl
+        E_nl_array[:shape_n] = E_n
+
         E_nl_grid.append(E_nl_array)
-        R_nl_grid.append(R_nl_array)
+
         if verbose==True:
             print('l = '+str(l)+'; n_max = '+str(shape_n))
         l+=1
     l_max = l
 
-    print('l_max = '+str(l_max)+'; n_max = '+str(n_max))
+    print('n_max = '+str(n_max)+'; l_max = '+str(l_max))
 
-    return rsolve, np.array(E_nl_grid), np.array(R_nl_grid), (l_max, n_max)
+    return rsolve, np.array(E_nl_grid).T, R_nl_grid, (n_max, l_max)
 
 
 
@@ -422,98 +480,206 @@ def compute_radial_solutions_from_list(phi, states, r_min=0.001, r_max=100., nst
     Emax = phi(r_max) / 2.
 
     E_nl_list = np.zeros(len(states))
-    R_nl_list = np.zeros((len(states), nsteps))
-    llist = np.unique(states[:, 0])
+    R_nl_list = np.empty(len(states), dtype=object)
+    llist = np.unique(states[:, 1])
     for l in llist:
         E_nl, R_nl = valsvecs(rsolve, l, phi, Emax, nsteps=nsteps, verbose=verbose)
         shape_n = len(E_nl)
         if len(E_nl)==0:
             print('No eigenmodes were found for l = '+str(l))
             break
-        for i in np.where(states[:, 0]==l)[0]:
-            n = states[i, 1]
+        for i in np.where(states[:, 1]==l)[0]:
+            n = states[i, 0]
             E_nl_list[i] = np.copy(E_nl[n])
-            R_nl_list[i] = np.copy(R_nl[n])
+            R_nl_list[i] = R_nl[n]
     return rsolve, E_nl_list, R_nl_list
 
 
-def amp_from_fE(r, E_nl, R_nl, fE, M_target):
+def amp_from_fE(r, E_nl, R_nl, fE, M_target, Radial=False):
     """
     Compute the eigenmode amplitudes a_nlm directly from an input distribution function
     """
     phi_ang = 0.
     theta_ang = 0.
     shape_nl = np.shape(E_nl)
-    Y_lm = np.zeros((shape_nl[0], shape_nl[0] * 2 + 1), dtype=complex)
+    Y_lm = np.zeros((shape_nl[1], shape_nl[1] * 2 + 1), dtype=complex)
 
-    for l in range(shape_nl[0]):
+    for l in range(shape_nl[1]):
         for m in range(-l, l+1):
             Y_lm[l, m] = scsp.sph_harm(m, l, phi_ang, theta_ang)
 
+    if Radial==True:
+        factor = np.sqrt((2. * np.pi)**3. * h_over_m)
+    else:
+        factor = np.sqrt((2. * np.pi * h_over_m)**3.)
+
     a_nlm = np.zeros_like(E_nl)
 
-    a_nlm[E_nl!=0.] = np.sqrt(fE(E_nl[E_nl!=0.]))
-    a_nlm[np.isnan(a_nlm)] = 0.
+    a_nlm[E_nl!=0.] = np.nan_to_num(np.sqrt(fE(E_nl[E_nl!=0.]))) * factor
     den_total = np.zeros(len(r))
 
-    for l in range(shape_nl[0]):
-        for n in range(shape_nl[1]):
-            if a_nlm[l, n]==0.:
+    for n in range(shape_nl[0]):
+        for l in range(shape_nl[1]):
+            if a_nlm[n, l]==0.:
                 continue
             else:
                 for m in range(-l, l+1):
-                    den_nlm = (a_nlm[l, n] * R_nl[l, n] * np.abs(Y_lm[l, m]))**2.
+                    den_nlm = (a_nlm[n, l] * R_nl[n, l](r) * np.abs(Y_lm[l, m]))**2.
                     den_total += den_nlm
 
     M_norm = np.trapz(4. * np.pi * r**2. * den_total, r)
-    den_total = den_total / M_norm * M_target
-    a_nlm = a_nlm * np.sqrt(M_target / M_norm)
     norm = np.sqrt(M_target / M_norm)
 
     return a_nlm, den_total, norm
 
 
-def amp_from_schwarzschild(r, rmax, rho, M_total, E_nl, R_nl, a_init=None, skip=1, max_iterations=2500, verbose=True):
+def amp_from_schwarzschild_E(r, rho, M_total, E_nl, R_nl, bins=50, a_init=None, fE=None, max_iterations=2500, verbose=True, inner_fit=False):
     """
     Compute the eigenmode amplitudes a_nl such that (a_nl @ R_nl)**2 = the density profile (Schwarzschild method).
     Degenerate m modes are not accounted for.
     """
-    rfit = r[r<rmax]
-    den_target = rho(rfit[::skip])
-    Eflat = E_nl.flatten()[E_nl.flatten()!=0]
-    Rflat_long = np.reshape(R_nl, (np.shape(R_nl)[0] * np.shape(R_nl)[1], np.shape(R_nl)[2]))[E_nl.flatten()!=0]
-    Rflat = Rflat_long[:, :len(rfit):skip]
-    
-    func_to_min = lambda amps: np.sum(((den_target - (amps**2.) @ (Rflat**2.)) / (den_target + (amps**2.) @ (Rflat**2.)))**2)
+    den_target = rho(r)
+    R_E2 = np.zeros((bins, len(r)))
 
-    if a_init is None:
-        aflat_init = np.ones(np.shape(Eflat)) * np.sqrt(M_total) * 0.0001
+    shape_nl = np.shape(E_nl)
+    Emax = np.max(E_nl[E_nl!=0.])
+    Emin = np.min(E_nl)
+    Eedges = np.linspace(Emin, Emax, bins+1)
+    Ebins = (Eedges[:-1] + Eedges[1:]) / 2.
+
+    phi_ang = 0.
+    theta_ang = 0.
+    
+    Y_lm_abs = np.zeros((shape_nl[1], shape_nl[1] * 2 + 1))
+
+    for l in range(shape_nl[1]):
+        for m in range(-l, l+1):
+            Y_lm_abs[l, m] = np.abs(scsp.sph_harm(m, l, phi_ang, theta_ang))
+        for n in range(shape_nl[0]):
+            if E_nl[n, l]==0.:
+                continue
+            else:
+                indx = np.max(np.where(Eedges[:-1]<=E_nl[n, l]))
+                for m in range(-l, l+1):
+                    R_E2[indx] += (R_nl[n, l](r) * Y_lm_abs[l, m])**2
+
+    if a_init==None:
+
+        a_E_unnorm = np.nan_to_num(np.sqrt(fE(Ebins)))
+        den_init = (a_E_unnorm**2) @ (R_E2)
+        M_norm = np.trapz(4. * np.pi * r**2. * den_init, r)
+        a_init = a_E_unnorm * np.sqrt(M_total / M_norm)
+
+    dof = 0
+    for i in range(len(Ebins)):
+        if np.count_nonzero((E_nl >= Eedges[i]) & (E_nl < Eedges[i+1])):
+            dof+=1
+
+    print('DOF = '+str(dof))
+
+    # func_to_min = lambda amps: np.log(np.sum((den_target - (amps**2) @ (R_E2))**2 / den_target))
+    # func_to_min = lambda amps: np.sum((np.log(den_target) - np.log((amps**2) @ (R_E**2)))**2)
+    # func_to_min = lambda amps: np.sum((den_target - (amps**2) @ (R_E2))**2 / den_target**2)
+    if inner_fit==True:
+        func_to_min = lambda amps: np.log10(1. / np.max(r) * np.trapz(((den_target - (amps**2) @ (R_E2))**2 / den_target**2 / r), r))
     else:
-        aflat_init = a_init.flatten()[E_nl.flatten()!=0]
+        func_to_min = lambda amps: np.log10(1. / np.max(r) * np.trapz(((den_target - (amps**2) @ (R_E2))**2 / den_target**2), r))
 
     if verbose==True:
         global Nfeval
-        Nfeval = 1
+        Nfeval = 0
         def callbackF(Xi):
             global Nfeval
             if Nfeval%20==0:
                 print('{0:4d}   {1: 3.6f}'.format(Nfeval, func_to_min(Xi)))
             Nfeval += 1
-        new_amps = scopt.minimize(func_to_min, aflat_init, callback=callbackF, options={'maxiter': max_iterations})
-        aflat = np.abs(new_amps.x)
+        new_amps = scopt.minimize(func_to_min, a_init, callback=callbackF, options={'maxiter': max_iterations})
+        a_E = np.abs(new_amps.x)
         print(new_amps.success)
         print('Optimization complete after '+str(new_amps.nit)+' iterations')
         print(new_amps.message)
     
     else:
-        new_amps = scopt.minimize(func_to_min, aflat_init, options={'maxiter': max_iterations})
+        new_amps = scopt.minimize(func_to_min, a_init, options={'maxiter': max_iterations})
+        a_E = np.abs(new_amps.x)
+        print('Optimization complete after '+str(new_amps.nit)+' iterations')
+
+    den_total = (a_E**2) @ (R_E2)
+
+    a_nlm = np.zeros_like(E_nl)
+
+    for n in range(shape_nl[0]):
+        for l in range(shape_nl[1]):
+            if E_nl[n, l] == 0.:
+                continue
+            else:
+                indx = np.max(np.where(Eedges[:-1]<=E_nl[n, l]))
+                a_nlm[n, l] = a_E[indx]
+
+    return a_nlm, den_total
+
+
+def amp_from_schwarzschild(r, rho, M_total, E_nl, R_nl, a_nlm_init=None, Radial=False, fE=None, max_iterations=2500, verbose=True, inner_fit=False):
+    """
+    Compute the eigenmode amplitudes a_nl such that (a_nl @ R_nl)**2 = the density profile (Schwarzschild method).
+    Returns a_nl such that degenerate modes are accounted for.
+    """
+    den_target = rho(r)
+    Eflat = E_nl.flatten()[E_nl.flatten()!=0]
+    Rflat_func = R_nl.flatten()[E_nl.flatten()!=0]
+    Rflat = np.zeros((len(Eflat), len(r)))
+    for i in range(len(Rflat_func)):
+        Rflat[i] = Rflat_func[i](r)
+    
+    # func_to_min = lambda amps: np.sum((np.log(den_target) - np.log((amps**2) @ (Rflat**2)))**2)
+    # func_to_min = lambda amps: np.sum((den_target - (amps**2) @ (Rflat**2))**2 / den_target**2)
+    if inner_fit==True:
+        func_to_min = lambda amps: np.log10(1. / np.max(r) * np.trapz(((den_target - (amps**2) @ (Rflat**2))**2 / den_target**2 / r), r))
+    else:
+        func_to_min = lambda amps: np.log10(1. / np.max(r) * np.trapz(((den_target - (amps**2) @ (Rflat**2))**2 / den_target**2), r))
+
+    if a_nlm_init is None:
+        print(Radial)
+        a_nlm_init, den_init, norm = amp_from_fE(r, E_nl, R_nl, fE, M_total, Radial=Radial)
+        if Radial==True:
+            a_nlm_init[0, 0] = np.mean(a_nlm_init[:, 0])
+            plt.semilogy(E_nl[:, 0], np.sqrt(fE(E_nl[:, 0])) * np.sqrt((2. * np.pi)**3. * h_over_m), 'g-')
+            plt.semilogy(E_nl, a_nlm_init, 'b+')
+            plt.ylim(100, 100000)
+            plt.show()
+        a_nl_init = amp_spher_to_rad(a_nlm_init)
+        aflat_init = a_nl_init.flatten()[E_nl.flatten()!=0]
+    else:
+        a_nl_init = amp_spher_to_rad(a_nlm_init)
+        aflat_init = a_nl_init.flatten()[E_nl.flatten()!=0]
+
+    print('DOF = '+str(len(aflat_init)))
+
+    if verbose==True:
+        global Nfeval
+        Nfeval = 0
+        def callbackF(Xi):
+            global Nfeval
+            if Nfeval%20==0:
+                print('{0:4d}   {1: 3.6f}'.format(Nfeval, func_to_min(Xi)))
+            Nfeval += 1
+        new_amps = scopt.minimize(func_to_min, aflat_init, method='BFGS', callback=callbackF, options={'maxiter': max_iterations})
+        aflat = np.abs(new_amps.x)
+        print(new_amps.success)
+        print('Optimization complete after '+str(new_amps.nit)+' iterations')
+        print(new_amps.message)
+        print(new_amps.fun)
+    
+    else:
+        new_amps = scopt.minimize(func_to_min, aflat_init, method='BFGS', options={'maxiter': max_iterations})
         aflat = np.abs(new_amps.x)
         print('Optimization complete after '+str(new_amps.nit)+' iterations')
 
-    den_total = (aflat**2.) @ (Rflat_long**2.)
+    den_total = (aflat**2.) @ (Rflat**2.)
     a_nl = np.zeros_like(E_nl)
     a_nl[E_nl != 0] = aflat
-    return a_nl, den_total
+    a_nlm = amp_rad_to_spher(a_nl)
+    return a_nlm, den_total
 
 
 def amp_rad_to_spher(a_nl):
@@ -521,7 +687,8 @@ def amp_rad_to_spher(a_nl):
     Convert a_nl to a_nlm (to account for degenerate m modes and allow for creation of 3D spherical halos)
     """
     dim = np.shape(a_nl)
-    a_scale = np.sqrt(4. * np.pi / np.repeat(np.arange(1., 2. * dim[0] + 1., 2.), dim[1]).reshape(dim))
+    a_scale = np.sqrt(4. * np.pi / np.tile(np.arange(1., 2. * dim[1] + 1., 2.), (dim[0], 1)))
+    # a_scale = np.sqrt(4. * np.pi / np.tile(np.arange(1., 2. * dim[1] + 1., 2.), dim[0]).reshape(dim))
     a_nlm = a_nl * a_scale
     return a_nlm
 
@@ -531,20 +698,47 @@ def amp_spher_to_rad(a_nlm):
     Convert a_nlm to a_nl (to consolidate degenerate m modes and allow for efficient calculation of the 1D density profile)
     """
     dim = np.shape(a_nlm)
-    a_scale = np.sqrt(4. * np.pi / np.repeat(np.arange(1., 2. * dim[0] + 1., 2.), dim[1]).reshape(dim))
+    a_scale = np.sqrt(4. * np.pi / np.tile(np.arange(1., 2. * dim[1] + 1., 2.), (dim[0], 1)))
     a_nl = a_nlm / a_scale
     return a_nl
 
 
-def random_phase(lmax, nmax):
+def den_from_amps(r, a_nlm, R_nl):
+    """
+    Calculate time-averaged density profile from amplitudes and eigenvectors for any input radius (no quantum interference)
+    """
+    shape_nl = np.shape(R_nl)
+    den_total = np.zeros(len(r))
+
+    phi_ang = 0.
+    theta_ang = 0.
+    Y_lm_abs = np.zeros((shape_nl[1], shape_nl[1] * 2 + 1))
+
+    for l in range(shape_nl[1]):
+        for m in range(-l, l+1):
+            Y_lm_abs[l, m] = np.abs(scsp.sph_harm(m, l, phi_ang, theta_ang))
+
+    for n in range(shape_nl[0]):
+        for l in range(shape_nl[1]):
+            if a_nlm[n, l]==0.:
+                continue
+            else:
+                for m in range(-l, l+1):
+                    den_nlm = (a_nlm[n, l] * R_nl[n, l](r) * Y_lm_abs[l, m])**2.
+                    den_total += den_nlm
+
+    return den_total
+
+
+def random_phase(nmax, lmax):
     """
     Output a random phase for each eigenmode (n, l, and m) given lmax and nmax
     """
-    phase_nlm = np.zeros((lmax, nmax, 2 * lmax + 1))
-    for l in range(lmax):
-        for n in range(nmax):
+    phase_nlm = np.zeros((nmax, lmax, 2 * lmax + 1))
+    for n in range(nmax):
+        for l in range(lmax):
             for m in range(-l, l + 1):
-                phase_nlm[l, n, m] = np.random.rand() * 2. * np.pi
+                phase_nlm[n, l, m] = np.random.rand() * 2. * np.pi
     
     return phase_nlm
 
@@ -563,17 +757,17 @@ def amp_to_clm(aphase_n, RatShell, lmax):
     return power
     
 
-def solve_amps_itr(M, phi_in, rho_in, fE, rbox, rfit=None, converge_target=0.01, maxiter=3, method='Schwarzschild', amps_guess='DF', schwarz_iter=500, nsteps=1024, full_output=False):
+def solve_amps_itr(rfit, rvir, rmax_factor, phi_in, rho_in, fE, converge_target=-5., maxiter=5, method='Unconstrained', nsteps=1024, ground_state=True, bins=100, schwarz_iter=500, inner_fit=False):
     """
     Solve for best fit amplitudes by iterating several times
     """
+
     r_arr = np.logspace(-3, 3, 100)
 
-    new_M = 4. * np.pi * np.trapz(r_arr**2. * rho_in(r_arr), r_arr)
-    print('Initial mass = 10^'+str(np.log10(new_M)))
+    M_enc = 4. * np.pi * np.trapz(rfit**2. * rho_in(rfit), rfit)
+    print('Enclosed mass in rfit = 10^'+str(np.log10(M_enc)))
 
-    rsolve_list = []
-    dens_list = []
+    den_list = []
 
     rho = rho_in
     phi = phi_in
@@ -581,75 +775,101 @@ def solve_amps_itr(M, phi_in, rho_in, fE, rbox, rfit=None, converge_target=0.01,
     for i in range(maxiter):
         print('Iteration #'+str(i+1))
         print('Solving for eigenmodes...')
-        rsolve, E_nl_grid, R_nl_grid, shape_nl = compute_radial_solutions(phi, M, r_max=rbox, nsteps=nsteps, verbose=False)
+        rsolve, E_nl, R_nl, shape_nl = compute_radial_solutions(phi, rho, r_vir=rvir, rmax_factor=rmax_factor, nsteps=nsteps, verbose=False)
 
-        M_target = np.trapz(4. * np.pi * rsolve**2. * rho(rsolve), rsolve)
-        a_nlm, den_DF, norm = amp_from_fE(rsolve, E_nl_grid, R_nl_grid, fE, M_target)
+        if ground_state==False:
+            E_nl[0, 0] = 0.
+            R_nl[0, 0] = None
 
         print('Solving for amplitudes...')
 
-        if rfit==None:
-            rfit=rbox
+        a_nlm_DF, den_DF, norm = amp_from_fE(rfit, E_nl, R_nl, fE, M_enc)
+        E_nl_compare = E_nl[E_nl!=0]
+        fE_compare = a_nlm_DF[E_nl!=0]
+        sort_indx = np.argsort(E_nl_compare)
         
         if method=='DF':
-            dens = den_DF
+            a_nlm = a_nlm_DF
+            den = den_DF
 
-        elif method=='Schwarzschild':
-            if amps_guess=='DF':
-                a_nl_compare = amp_spher_to_rad(a_nlm)
-                a_nl, den_schwarz = amp_from_schwarzschild(rsolve, rfit, rho, M, E_nl_grid, R_nl_grid, a_init=a_nl_compare, max_iterations=schwarz_iter, verbose=True)
-            elif amps_guess=='flat':
-                a_nl, den_schwarz = amp_from_schwarzschild(rsolve, rfit, rho, M, E_nl_grid, R_nl_grid, max_iterations=schwarz_iter, verbose=True)
-            else: print('Must specify shape of initial amplitude guess (DF or flat)')
+        elif method=='Isotropic':
+            a_nlm, den = amp_from_schwarzschild_E(rfit, rho, M_enc, E_nl, R_nl, fE=fE, bins=bins, max_iterations=schwarz_iter, verbose=True, inner_fit=inner_fit)
+        elif method=='Unconstrained':
+            a_nlm, den = amp_from_schwarzschild(rfit, rho, M_enc, E_nl, R_nl, fE=fE, max_iterations=schwarz_iter, verbose=True, inner_fit=inner_fit)
+
+        elif method=='Radial':
+            E_nl[:, 1:] = 0.
+            R_nl[:, 1:] = None
+            fE = DF_invert_radial(phi_in, rho_in)
+            a_nlm, den = amp_from_schwarzschild(rfit, rho, M_enc, E_nl, R_nl, Radial=True, fE=fE, max_iterations=schwarz_iter, verbose=True)
+            a_nlm_DF, den_DF, norm = amp_from_fE(rfit, E_nl, R_nl, fE, M_enc, Radial=True)
+            E_nl_compare = E_nl[E_nl!=0]
+            fE_compare = a_nlm_DF[E_nl!=0]
+            sort_indx = np.argsort(E_nl_compare)
             
-            a_nlm = amp_rad_to_spher(a_nl)
+        else: print('Must specify method (DF, Isotropic, Radial, Core, or Unconstrained)')
 
-            dens = den_schwarz
-        
-        else: print('Must specify method (DF or Schwarzschild)')
+        den_long = den_from_amps(rsolve, a_nlm, R_nl)
 
-        rho_interp = scinterp.interp1d(rsolve, dens, bounds_error=False, fill_value=(dens[0], 0.), assume_sorted=True)
-        rho_in = lambda r: rho_interp(r)
+        rho_interp = scinterp.interp1d(rsolve, den_long, bounds_error=False, fill_value=(den_long[0], 0.), assume_sorted=True)
 
-        new_M = 4. * np.pi * np.trapz(r_arr**2. * np.array([rho_in(r) for r in r_arr]), r_arr)
-        print('Updated mass = 10^'+str(np.log10(new_M)))
+        M_enc = 4. * np.pi * np.trapz(rfit**2. * rho_interp(rfit), rfit)
+        print('Updated enclosed mass in rfit = 10^'+str(np.log10(M_enc)))
 
         print('Solving for new potential...')
-        phi_new, rho_new, M = initiate_potential(rho_in)
-        if i < maxiter - 1:
-            fE = DF_invert(phi_new, rho_new, M)
+        phi_new, rho_new, M = initiate_potential(rho_interp)
 
-        rsolve_list.append(rsolve)
-        dens_list.append(dens)
+        den_list.append(rho_new)
 
-        phi_diff = ((phi_new(rsolve) - phi(rsolve)) / (phi_new(rsolve) + phi(rsolve)))**2.
-        converge_crit = 2. / np.max(rsolve) * np.trapz(phi_diff, rsolve)
+        rho_diff = (rho(rfit) - rho_new(rfit))**2 / (rho(rfit)**2)
+        converge_crit = np.log10(1. / np.max(rfit) * np.trapz(rho_diff, rfit))
         print('Convergence Criterion after Iteration #'+str(i+1)+': D = '+str(converge_crit))
         phi = phi_new
         rho = rho_new
+
+        fig, f_axes = plt.subplots(ncols=2, nrows=2, figsize=(16, 6), constrained_layout=True, sharex='col', sharey=False, gridspec_kw={'height_ratios': [3, 1]})
+        fig.subplots_adjust(hspace=0)
+        fig.subplots_adjust(wspace=0.3)
+        f_axes[0, 0].loglog(rsolve, rho_in(rsolve), 'b-', label='Target')
+        for j in range(i+1):
+            f_axes[0, 0].loglog(rsolve, den_list[j](rsolve), label='Iteration #'+str(j+1))
+            f_axes[1, 0].semilogx(rfit, (rho_in(rfit) - den_list[j](rfit))**2 / rho_in(rfit)**2)
+        f_axes[0, 0].set_xlim(0.01, 100)
+        f_axes[1, 0].set_xlim(0.01, 100)
+        f_axes[1, 0].set_xlabel(r'$r$ [kpc]')
+        f_axes[0, 0].set_ylabel(r'$\rho$ [$M_\odot$ / kpc$^3$]')
+        f_axes[1, 0].set_ylabel(r'$\frac{(\rho_i - \rho_o)^2}{\rho_i^2}$')
+        f_axes[0, 0].legend()
+        gs = f_axes[0, 1].get_gridspec()
+        for ax in f_axes[:, 1]:
+            ax.remove()
+        axbig = fig.add_subplot(gs[:, 1])
+        axbig.semilogy(E_nl, a_nlm, 'b+')
+        axbig.semilogy(E_nl[0, 0], a_nlm[0, 0], 'b+', label=r'$a_{nlm}$')
+        axbig.semilogy(E_nl_compare[sort_indx], fE_compare[sort_indx], 'k--', label=r'$f(E)$')
+        axbig.set_xlabel(r'$E$ [(km / s)$^2$]')
+        axbig.set_ylabel('Amplitude (unnormalized)')
+        axbig.legend()
+        plt.show()
+        plt.close()
+
         if converge_crit < converge_target and i > 0:
             print('Convergence criterion met!')
             break
 
-    phase_nlm = random_phase(np.shape(E_nl_grid)[0], np.shape(E_nl_grid)[1])
+    phase_nlm = random_phase(np.shape(E_nl)[0], np.shape(E_nl)[1])
 
     print('Completed!')
 
-    if full_output==False:
-
-        return E_nl_grid, R_nl_grid, a_nlm, phase_nlm, rsolve, dens
-
-    elif full_output==True:
-
-        return E_nl_grid, R_nl_grid, a_nlm, phase_nlm, rsolve, dens, rsolve_list, dens_list
+    return E_nl, R_nl, a_nlm, phase_nlm, rho, den_list
     
 
 def build_halo(rshells, E_nl, rsolve, R_nl, a_nlm, phase_nlm, lgrid=None, dt=None, steps=None):
     """
     Build a 3D halo using spherical harmonic transformations
     """
-    lmax = np.shape(E_nl)[0]
-    nmax = np.shape(E_nl)[1]
+    nmax = np.shape(E_nl)[0]
+    lmax = np.shape(E_nl)[1]
     
     if lgrid is None:
         if lmax<60:
@@ -675,9 +895,10 @@ def build_halo(rshells, E_nl, rsolve, R_nl, a_nlm, phase_nlm, lgrid=None, dt=Non
         for i in range(len(rshells)):
             for n in range(nmax):
                 for l in range(lmax):
-                    RatShell[l] = np.interp(rshells[i], rsolve, R_nl[l, n, :len(rsolve)])
+                    if E_nl[n, l]!=0.:
+                        RatShell[l] = R_nl[n, l](rshells[i])
                 
-                power = amp_to_clm(aphase[:, n, :], RatShell, lmax)
+                power = amp_to_clm(aphase[n], RatShell, lmax)
                 
                 clm = pysh.SHCoeffs.from_array(power, normalization='ortho')
                 grid = clm.expand(lmax=lgrid)
@@ -693,15 +914,16 @@ def build_halo(rshells, E_nl, rsolve, R_nl, a_nlm, phase_nlm, lgrid=None, dt=Non
     elif dt is not None and steps is not None:
         print('Creating halo and evolving for '+str(dt * steps)+' Gyr')
 
-        const = 5.33453e20 * m_s                    # (unit.eV / hbar).to(1 / unit.Gyr) / (c.to(unit.km / unit.s))**2 * m23
+        const = 1 / (h_over_m / km_s_to_kpc_gyr)                    # (unit.eV / hbar).to(1 / unit.Gyr) / (c.to(unit.km / unit.s))**2 * m23
 
         grid3d = []
 
         for step in range(steps):
 
-            print()
+            print(step)
 
-            aphase = (np.cos(phase_nlm) + 1j * np.sin(phase_nlm)) * a_nlm[:,:,None] * np.exp(-1j * E_nl[:,:,None] * const * step * dt)
+            phase_k = phase_nlm + (-E_nl[:,:,None] / h_over_m * km_s_to_kpc_gyr * step * dt)
+            aphase = np.exp(1j * phase_k) * a_nlm[:,:,None]
             
             clm_setup = pysh.SHCoeffs.from_zeros(lmax=lgrid, kind='complex')
             grid_setup = clm_setup.expand(lmax=lgrid)
@@ -717,9 +939,10 @@ def build_halo(rshells, E_nl, rsolve, R_nl, a_nlm, phase_nlm, lgrid=None, dt=Non
             for i in range(len(rshells)):
                 for n in range(nmax):
                     for l in range(lmax):
-                        RatShell[l] = np.interp(rshells[i], rsolve, R_nl[l, n, :len(rsolve)])
+                        if E_nl[n, l]!=0.:
+                            RatShell[l] = R_nl[n, l](rshells[i])
                     
-                    power = amp_to_clm(aphase[:, n, :], RatShell, lmax)
+                    power = amp_to_clm(aphase[n], RatShell, lmax)
                     
                     clm = pysh.SHCoeffs.from_array(power, normalization='ortho')
                     grid = clm.expand(lmax=lgrid)
@@ -745,7 +968,7 @@ def plot_slices(grid3d, Rs, thetas, phis, res, rmax, rshells):
 
     dens_flat = np.abs(grid3d.flatten())**2.
 
-    boxedge = np.sqrt(rmax**2 / 3.)
+    boxedge = rmax
 
     axis1 = np.linspace(-boxedge, boxedge, res)
     axis2 = np.linspace(-boxedge, boxedge, res)
@@ -759,7 +982,7 @@ def plot_slices(grid3d, Rs, thetas, phis, res, rmax, rshells):
     
     rshell_dens = np.mean(np.abs(grid3d)**2., axis=(1, 2))
     bar_max = np.log10(np.max(dens_xy))
-    bar_min = np.log10(np.min(rshell_dens[rshells < boxedge]) / 10.)
+    bar_min = np.log10(np.min(rshell_dens[rshells < boxedge]))
     
     fig, f_axes = plt.subplots(ncols=3, figsize=(24, 8), constrained_layout=True, sharex=False, sharey=False)
 
@@ -793,7 +1016,7 @@ def halo_to_cube(grid3d, Rs, thetas, phis, res, rmax):
     xs_flat = Rs_flat * np.sin(thetas_flat) * np.cos(phis_flat)
     ys_flat = Rs_flat * np.sin(thetas_flat) * np.sin(phis_flat)
 
-    boxedge = np.sqrt(rmax**2 / 3.)
+    boxedge = rmax
 
     zs_flat = Rs_flat * np.cos(thetas_flat)
 
@@ -828,7 +1051,7 @@ def cube_to_ezno_input(psi, res, boxedge, enzo_dens=1.8788e-29, enzo_time=2.5194
 
     # set
     if (zero_momentum == True):
-        side = np.linspace(0,256,256,endpoint=False)
+        side = np.linspace(0,res,res,endpoint=False)
         x,y,z = np.meshgrid(side,side,side,indexing='ij')
         
         # compute velocity
@@ -917,7 +1140,7 @@ def build_eigenmode_cubes(states, rsolve, R_nl, rcube, res, m_modes=None):
         gridnum = len(states)
         print('No m_modes files provided; calculating only m=0 modes')
     else:
-        gridnum = len(m_modes) - np.count_nonzero(m_modes) + np.sum(2 * states[m_modes][:, 0] + 1)
+        gridnum = len(m_modes) - np.count_nonzero(m_modes) + np.sum(2 * states[m_modes][:, 1] + 1)
 
     psi = np.zeros((gridnum, res, res, res), dtype=np.complex64)
     indx = np.zeros((gridnum, 3))
@@ -925,27 +1148,27 @@ def build_eigenmode_cubes(states, rsolve, R_nl, rcube, res, m_modes=None):
     j = 0
 
     for i in range(len(states)):
-        l = states[i, 0]
-        n = states[i, 1]
+        n = states[i, 0]
+        l = states[i, 1]
         if m_modes is None:
             m = 0
-            indx[i] = [l, n, m]
-            RatRad = np.interp(Rad, rsolve, R_nl[i])
+            indx[i] = [n, l, m]
+            RatRad = R_nl[i](Rad)
             spharm = scsp.sph_harm(m, l, phi, theta)
             psi[i] = (RatRad * spharm).astype(np.complex64)
 
         else:
             if m_modes[i]==False:
                 m = 0
-                indx[j] = [l, n, m]
-                RatRad = np.interp(Rad, rsolve, R_nl[i])
+                indx[j] = [n, l, m]
+                RatRad = R_nl[i](Rad)
                 spharm = scsp.sph_harm(m, l, phi, theta)
                 psi[j] = (RatRad * spharm).astype(np.complex64)
                 j+=1
             else:
                 for m in range(-l, l+1):
-                    indx[j] = [l, n, m]
-                    RatRad = np.interp(Rad, rsolve, R_nl[i])
+                    indx[j] = [n, l, m]
+                    RatRad = R_nl[i](Rad)
                     spharm = scsp.sph_harm(m, l, phi, theta)
                     psi[j] = (RatRad * spharm).astype(np.complex64)
 
@@ -954,7 +1177,7 @@ def build_eigenmode_cubes(states, rsolve, R_nl, rcube, res, m_modes=None):
     return psi, indx
 
 
-def halo_decompose(psi, boxsize, boxedge, Mh0, l_max=None, n_max=None, den=None):
+def halo_decompose(psi, boxsize, boxedge, Mh0, n_max=None, l_max=None, den=None):
     """
     Decompose a halo into eigenmode amplitudes
     """
@@ -962,8 +1185,8 @@ def halo_decompose(psi, boxsize, boxedge, Mh0, l_max=None, n_max=None, den=None)
         print("Function currently incomplete -- must include input density for now")
         return
     else:
-        phi, rho = initiate_potential(den, Mh0, core=False)
-        rsolve, E_nl, R_nl, shape_nl = compute_radial_solutions(phi, Mh0, verbose=True)
+        phi, rho = initiate_potential(den, core=False)
+        rsolve, E_nl, R_nl, shape_nl = compute_radial_solutions(phi, r_max=boxedge * 1.1, verbose=True)
 
     x = np.linspace(-boxedge,boxedge,boxsize)
     y = np.linspace(-boxedge,boxedge,boxsize)
@@ -975,12 +1198,12 @@ def halo_decompose(psi, boxsize, boxedge, Mh0, l_max=None, n_max=None, den=None)
 
     binside = boxedge * 2.0 / boxsize
 
-    if l_max==None:
-        l_max = np.shape(E_nl)[0]
     if n_max==None:
-        n_max = np.shape(E_nl)[1]
+        n_max = np.shape(E_nl)[0]
+    if l_max==None:
+        l_max = np.shape(E_nl)[1]
 
-    A_nlm = np.zeros([l_max, n_max, 2 * l_max + 1])
+    A_nlm = np.zeros([n_max, l_max, 2 * l_max + 1])
     psi = np.zeros_like(Rad, dtype=complex)
     RatRad = np.zeros((n_max, np.shape(Rad)[0], np.shape(Rad)[1], np.shape(Rad)[2]))
 
@@ -988,37 +1211,32 @@ def halo_decompose(psi, boxsize, boxedge, Mh0, l_max=None, n_max=None, den=None)
         print(l)
 
         for n in range(n_max):
-            if E_nl[l, n] == 0.:
+            if E_nl[n, l] == 0.:
                 continue
             else:
-                RatRad[n] = np.interp(Rad, rsolve, R_nl[l, n, :len(rsolve)])
+                RatRad[n] = R_nl[n, l](Rad)
 
         for m in range(0, l+1):
             spharm_interp = scsp.sph_harm(m, l, phi, theta) 
             for n in range(n_max):
-                if E_nl[l, n] == 0.:
+                if E_nl[n, l] == 0.:
                     continue
                 else:
                     RatRad0 = RatRad[n]
                     if m==0:
                         psi0 = RatRad0 * spharm_interp
-                        A_nlm[l, n, m] = np.sum(psi * psi0 * binside**3.)
+                        A_nlm[n, l, m] = np.sum(psi * psi0 * binside**3.)
                     else:
                         psi0 = RatRad0 * spharm_interp
-                        A_nlm[l, n, m] = np.sum(psi * psi0 * binside**3.)
+                        A_nlm[n, l, m] = np.sum(psi * psi0 * binside**3.)
                         psi0 = RatRad0 * (-1)**m * np.conjugate(spharm_interp)
-                        A_nlm[l, n, -m] = np.sum(psi * psi0 * binside**3.)
+                        A_nlm[n, l, -m] = np.sum(psi * psi0 * binside**3.)
     return A_nlm
 
 
 def evolve(rshell, E_nl, rsolve, R_nl, a_nlm, phase_nlm, t):
     # input: t in Gyr
-    # m/h in code unit
-    mhcoef = np.sqrt(m2h2)
-    # 1Gyr in code unit
-    tunit = 1e9*365*24*3600/(3.086e21/1e5)
-    t = t*tunit
-    phase_k = -E_nl*mhcoef*t
+    phase_k = -E_nl / h_over_m * km_s_to_kpc_gyr * t
     phase = phase_nlm + phase_k[:,:,None] 
     return build_halo(rshell, E_nl, rsolve, R_nl, a_nlm, phase)
 
