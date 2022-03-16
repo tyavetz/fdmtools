@@ -1039,7 +1039,7 @@ def halo_to_cube(grid3d, Rs, thetas, phis, res, rmax):
     return psi
 
 
-def cube_to_ezno_input(psi, res, boxedge, enzo_dens=1.8788e-29, enzo_time=2.519445e17, absorption_boundary=False, zero_momentum=False):
+def cube_to_enzo_input(psi, res, boxedge, enzo_dens=1.8788e-29, enzo_time=2.519445e17, absorption_boundary=False, zero_momentum=False):
 
     dens_gal_to_cgs = 6.7679e-32
     dens_to_enzo = dens_gal_to_cgs / enzo_dens
