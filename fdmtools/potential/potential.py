@@ -61,7 +61,7 @@ def initialize_potential(rho_in, rmin=0.001, rmax=1000.):
 
     """
     r_spline = np.logspace(np.log10(rmin), np.log10(rmax), 256)
-    rho_halo = rho_in(rspline)
+    rho_halo = rho_in(r_spline)
 
     rho_out = scinterp.interp1d(r_spline, rho_halo, kind='cubic', bounds_error=False, fill_value=(rho_halo[0], 0.))
 
@@ -74,7 +74,7 @@ def initialize_potential(rho_in, rmin=0.001, rmax=1000.):
     return phi_out, rho_out, M_total
 
 
-def DF_invert(phi, rho, DF_type='isotropic', rmin=0.001, rmax=1000.):
+def DF_invert(phi, rho, DF_type='Isotropic', rmin=0.001, rmax=1000.):
     """
     Inversion formula to calculate the distribution function f(E) of a potential given an array of total energy
 
@@ -84,7 +84,7 @@ def DF_invert(phi, rho, DF_type='isotropic', rmin=0.001, rmax=1000.):
         Cubic spline object that returns the value of the potential in (km / s)^2 as a function of radius (in kpc)
     rho : scipy ppoly object (cubic spline)
         Cubic spline object that returns the value of the density in Solar Masses per kpc^3 as a function of radius
-    DF_type : string (optional, default: 'isotropic')																	TO IMPLEMENT!!!
+    DF_type : string (optional, default: 'Isotropic')																	TO IMPLEMENT!!!
     	string specifying whether the returned distribution function should be isotropic or radial
     rmin : numeric (optional, default: 0.001)
         Minimum radius, in kpc, for computation of density (for r<rmin, density is assumed to be equal to density at rmin)
@@ -108,21 +108,21 @@ def DF_invert(phi, rho, DF_type='isotropic', rmin=0.001, rmax=1000.):
     rho_phi = scinterp.CubicSpline(phi_spline[idx], rho_spline[idx])
     drho_dphi = rho_phi.derivative()
     
-    if DF_type=='isotropic':
+    if DF_type=='Isotropic':
 
         def integrand(phi_integ, e_prime):
             return 1. / np.sqrt(phi_integ - e_prime) * drho_dphi(phi_integ)
 
         prefactor = 1. / (2. * np.sqrt(2.) * np.pi**2)
         
-    elif DF_type=='radial':
+    elif DF_type=='Radial':
         def integrand(phi_integ, e_prime):
             return 1. / np.sqrt(phi_integ - e_prime) * rho_phi(phi_integ) * r_phi(phi_integ)**2
 
         prefactor = -1. / (np.sqrt(2.) * np.pi**2)
         
     else:
-        print("DF_type must be 'isotropic' or 'radial'")
+        print("DF_type must be 'Isotropic' or 'Radial'")
         return None
 
     integ_spline = np.array([scinteg.quad(integrand, e_prime, e_range[-1], args=(e_prime,))[0] for e_prime in e_range[:-1]])
